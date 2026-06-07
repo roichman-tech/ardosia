@@ -78,15 +78,15 @@ This is part of the migration the schema comment reserved for "leaving Supabase,
 **The separation that matters is module, not network:**
 
 ```
-/core    → pricing, message building, checkout, provisioning logic
-           Pure TypeScript. Zero imports from next/* or react.
-           Enforced by ESLint rule. Unit-testable in isolation.
-/app/api → thin handlers: parse → call core → serialize
+src/core    → pricing, message building, checkout, provisioning logic
+              Pure TypeScript. Zero imports from next/* or react.
+              Enforced by ESLint rule. Unit-testable in isolation.
+src/app/api → thin handlers: parse → call core → serialize
 ```
 
 **Why not a separate Hono service:** either Next SSR calls Hono over HTTP (a network hop on the hottest path, against constraint 3, plus service-to-service auth that didn't exist) or Next reads Postgres directly and Hono only writes (domain logic — e.g. price visibility — split across two services: *worse* separation of responsibilities). Plus: second deploy, second pipeline, second secrets set, CORS, version skew, and a new failure mode against constraint 5.
 
-**Middle path (available, not chosen):** mount a Hono app inside Next via catch-all route handler (`app/api/[...route]/route.ts` + Vercel adapter). Same single deployment, Hono idioms, extraction later = swap the adapter.
+**Middle path (available, not chosen):** mount a Hono app inside Next via catch-all route handler (`src/app/api/[...route]/route.ts` + Vercel adapter). Same single deployment, Hono idioms, extraction later = swap the adapter.
 
 **Extraction condition:** a second real consumer (mobile app, second suite product). With `/core` isolated, extraction is a day's work of thin handlers.
 
@@ -157,14 +157,18 @@ Internal rewrite to `/(catalog)/[tenantId]/...`; the visitor only ever sees thei
 
 ```
 ardosia/
-├── app/
-│   ├── (catalog)/          # public routes, resolved by host in middleware
-│   ├── (dashboard)/        # app.ardosia.app, Clerk
-│   └── api/                # checkout, beacon (/api/e), Clerk webhook, upload
-├── core/                   # pure TS domain logic — no next/* imports (lint-enforced)
-├── db/
-│   └── schema.gen.ts       # drizzle-kit pull output; never hand-edited (CI diff check)
-├── supabase/
+├── src/                    # all application source
+│   ├── app/
+│   │   ├── (catalog)/      # public routes, resolved by host in middleware
+│   │   ├── (dashboard)/    # app.ardosia.app, Clerk
+│   │   └── api/            # checkout, beacon (/api/e), Clerk webhook, upload
+│   ├── core/               # pure TS domain logic — no next/* imports (lint-enforced)
+│   ├── db/
+│   │   └── schema.gen.ts   # drizzle-kit pull output; never hand-edited (CI diff check)
+│   ├── lib/                # shared helpers (Supabase/Clerk clients, utils)
+│   ├── env/                # validated environment access
+│   └── proxy.ts            # host→tenant middleware entry
+├── supabase/               # stays at repo root, outside src/ (Supabase CLI convention)
 │   ├── migrations/         # plain SQL — source of truth (schema v1 = 0001)
 │   └── seed.sql            # 2 fake tenants
 ├── scripts/
