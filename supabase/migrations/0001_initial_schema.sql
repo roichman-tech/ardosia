@@ -23,7 +23,18 @@
 --     at read time, never persisted.
 -- ============================================================
 
-CREATE EXTENSION IF NOT EXISTS unaccent;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_extension e
+    JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'unaccent' AND n.nspname <> 'public'
+  ) THEN
+    ALTER EXTENSION unaccent SET SCHEMA public;
+  END IF;
+END $$;
+
+CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS pgcrypto; -- gen_random_uuid()
 
 -- unaccent() is STABLE, not IMMUTABLE — cannot be used in an
@@ -84,7 +95,7 @@ CREATE TABLE tenant_user (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id     uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
   auth_user_id  text NOT NULL,                 -- opaque provider ID (Clerk)
-  role          text NOT NULL DEFAULT 'owner',
+  role          text NOT NULL,
   created_at    timestamptz NOT NULL DEFAULT now(),
   deleted_at    timestamptz,                   -- set via Clerk user.deleted webhook
 
@@ -104,7 +115,7 @@ CREATE TABLE product (
   tenant_id     uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
   name          text NOT NULL,
   description   text NOT NULL DEFAULT '',
-  price_cents   integer NOT NULL,
+  price_cents   bigint NOT NULL,
   hide_price    boolean NOT NULL DEFAULT false, -- exception to kill-switch
   max_quantity  integer,                        -- NULL = unlimited
   in_stock      boolean NOT NULL DEFAULT true,  -- "out today"
@@ -138,7 +149,6 @@ CREATE TABLE product_image (
   storage_key  text NOT NULL,                  -- never persist public URL
   position     integer NOT NULL DEFAULT 0,
   created_at   timestamptz NOT NULL DEFAULT now(),
-  deleted_at   timestamptz,
 
   -- DEFERRABLE so reordering (swap positions) works in one tx
   CONSTRAINT uq_product_image_position
@@ -146,7 +156,7 @@ CREATE TABLE product_image (
 );
 
 CREATE INDEX ix_product_image_product
-  ON product_image (product_id, position) WHERE deleted_at IS NULL;
+  ON product_image (product_id, position);
 
 -- ============================================================
 -- FEATURE / OPTION (product variations)
@@ -174,7 +184,7 @@ CREATE TABLE option (
   tenant_id         uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
   feature_id        uuid NOT NULL REFERENCES feature(id) ON DELETE CASCADE,
   name              text NOT NULL,
-  price_delta_cents integer NOT NULL DEFAULT 0, -- 0 = no price change
+  price_delta_cents bigint NOT NULL DEFAULT 0, -- 0 = no price change
   is_active         boolean NOT NULL DEFAULT true,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
@@ -248,7 +258,7 @@ CREATE INDEX ix_product_tag_tag ON product_tag (tag_id);
 CREATE TABLE checkout_event (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id          uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
-  total_amount_cents integer,            -- NULL when prices hidden
+  total_amount_cents bigint,            -- NULL when prices hidden
   message_text       text NOT NULL,      -- exact generated message
   customer_note      text,               -- per-order observation
   created_at         timestamptz NOT NULL DEFAULT now()
@@ -264,7 +274,7 @@ CREATE TABLE checkout_event_item (
   product_id         uuid REFERENCES product(id) ON DELETE SET NULL, -- best-effort link
   product_name       text NOT NULL,      -- SNAPSHOT
   quantity           integer NOT NULL,
-  unit_price_cents   integer,            -- SNAPSHOT; NULL when hidden
+  unit_price_cents   bigint,            -- SNAPSHOT; NULL when hidden
   selected_options   jsonb NOT NULL DEFAULT '[]'::jsonb,
   -- shape: [{ "feature": "Tamanho", "option": "G", "price_delta_cents": 500 }]
 
