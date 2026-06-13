@@ -6,16 +6,12 @@ import { z } from "zod";
  * expose. Validated once at module load — a missing/invalid value fails fast.
  */
 const clientSchema = z.object({
-  NEXT_PUBLIC_SUPABASE_URL: z.url(),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().min(1),
 });
 
 // `NEXT_PUBLIC_*` vars are inlined at build time, so each must be referenced
 // statically by name — a dynamic lookup (`process.env[key]`) would not inline.
 const parsed = clientSchema.safeParse({
-  NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
 });
