@@ -44,7 +44,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO ardosia_app;
 
 --- Checkout event tables are immutable logs, so we revoke update and delete operations
-REVOKE UPDATE, DELETE ON checkout_event, checkout_event_item FROM ardosia_app
+REVOKE UPDATE, DELETE ON checkout_event, checkout_event_item FROM ardosia_app;
 
 -- auth.jwt() lives in the auth schema (Supabase); current_tenant_id()
 -- calls it, so the app role needs to reach it.
