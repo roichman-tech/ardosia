@@ -192,9 +192,20 @@ CREATE POLICY tenant_self_isolation ON tenant
 --     current_tenant_id() needs to resolve the JWT path. The public
 --     catalog path (no JWT) sees nothing here and doesn't need to —
 --     it resolves the tenant from app.tenant_id instead.
+--
+--     The JWT sub is read DIRECTLY from the request.jwt.claims GUC,
+--     NOT via auth.jwt(): this policy runs in the invoker's context,
+--     and ardosia_app (NOBYPASSRLS) has no access to the auth schema
+--     (SET ROLE ardosia_app; SELECT auth.jwt() -> permission denied
+--     for schema auth), so an auth.jwt() call would break the first
+--     SELECT the app makes against tenant_user. auth.jwt() is just a
+--     wrapper over this GUC; reading the GUC needs no schema grant.
+--     (current_tenant_id() in 0002 stays SECURITY DEFINER — that is
+--     what gives IT auth-schema access; only this invoker-context
+--     policy must avoid auth.jwt().)
 DROP POLICY IF EXISTS tenant_user_self_access ON tenant_user;
 CREATE POLICY tenant_user_self_access ON tenant_user
   FOR ALL
-  USING (auth_user_id = (auth.jwt() ->> 'sub'))
-  WITH CHECK (auth_user_id = (auth.jwt() ->> 'sub'));
+  USING (auth_user_id = (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))
+  WITH CHECK (auth_user_id = (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'));
   
