@@ -26,9 +26,21 @@
 -- ------------------------------------------------------------
 -- Fixtures (run as the seeding superuser → RLS bypassed)
 -- ------------------------------------------------------------
-INSERT INTO tenant (id, name, slug, whatsapp_number) VALUES
-  ('11111111-1111-1111-1111-111111111111', 'Tenant A', 'tenant-a', '+5588900000001'),
-  ('22222222-2222-2222-2222-222222222222', 'Tenant B', 'tenant-b', '+5588900000002');
+-- The two SD§8 fake tenants, deliberately divergent so every E2 (catalog)
+-- and E3 (cart) branch has data. The minimal isolation fixtures live here;
+-- the rich catalog/cart fixtures that exercise the branches are appended at
+-- the very bottom (after the asserts), so the count-bearing asserts run
+-- against a controlled fixture and the catalog data cannot perturb them.
+--   A — global price kill-switch OFF (show_product_prices = false), no
+--       custom_domain (slug-routed), default branding.
+--   B — prices ON with a per-product hide_price exception, custom_domain set
+--       (host-routed), non-default accent + non-empty checkout template.
+INSERT INTO tenant
+  (id, name, slug, whatsapp_number, show_product_prices, custom_domain, accent_color, checkout_template) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'Tenant A', 'tenant-a', '+5588900000001',
+     false, NULL,                   '#0A0A0A', ''),
+  ('22222222-2222-2222-2222-222222222222', 'Tenant B', 'tenant-b', '+5588900000002',
+     true,  'loja.tenant-b.com.br', '#C2410C', 'Olá! Segue meu pedido pela Loja B:');
 
 -- Membership rows: A owned by clerk_user_a, B owned by clerk_user_b.
 INSERT INTO tenant_user (tenant_id, auth_user_id, role) VALUES
@@ -164,12 +176,15 @@ SET LOCAL ROLE ardosia_app;
 -- ASSERT 3 — cross-tenant SELECT returns 0 (policy USING clause).
 DO $$
 BEGIN
-  IF (SELECT count(*) FROM product
-        WHERE tenant_id = '22222222-2222-2222-2222-222222222222') <> 0 THEN
-    RAISE EXCEPTION 'ISOLATION FAIL: tenant A saw tenant B products under RLS';
+  -- Count-agnostic: the bottom of this file seeds many catalog products for
+  -- BOTH tenants. The isolation claim is "everything visible belongs to A,
+  -- and A sees at least one" — independent of how many rows the seed grows.
+  IF EXISTS (SELECT 1 FROM product
+               WHERE tenant_id <> '11111111-1111-1111-1111-111111111111') THEN
+    RAISE EXCEPTION 'ISOLATION FAIL: tenant A saw a product from another tenant under RLS';
   END IF;
-  IF (SELECT count(*) FROM product) <> 1 THEN
-    RAISE EXCEPTION 'ISOLATION FAIL: tenant A should see exactly its own product';
+  IF NOT EXISTS (SELECT 1 FROM product) THEN
+    RAISE EXCEPTION 'ISOLATION FAIL: tenant A should see its own product(s)';
   END IF;
   RAISE NOTICE 'OK: RLS confines SELECT to the current tenant';
 END $$;
@@ -284,9 +299,9 @@ BEGIN
     RAISE EXCEPTION 'ISOLATION FAIL: app.tenant_id was not the sole mechanism; request.jwt.claims leaked in (got %)',
       current_tenant_id();
   END IF;
-  IF (SELECT count(*) FROM product) <> 1
-  OR (SELECT count(*) FROM product
-        WHERE tenant_id = '22222222-2222-2222-2222-222222222222') <> 0 THEN
+  IF EXISTS (SELECT 1 FROM product
+               WHERE tenant_id <> '11111111-1111-1111-1111-111111111111')
+  OR NOT EXISTS (SELECT 1 FROM product) THEN
     RAISE EXCEPTION 'ISOLATION FAIL: GUC-resolved tenant saw the wrong product set';
   END IF;
 END $$;
@@ -464,10 +479,10 @@ SELECT set_config('app.tenant_id', '11111111-1111-1111-1111-111111111111', true)
 SET LOCAL ROLE ardosia_catalog;
 DO $$
 BEGIN
-  -- reads are tenant-scoped
-  IF (SELECT count(*) FROM product) <> 1
-  OR (SELECT count(*) FROM product
-        WHERE tenant_id = '22222222-2222-2222-2222-222222222222') <> 0 THEN
+  -- reads are tenant-scoped (count-agnostic; see ASSERT 3)
+  IF EXISTS (SELECT 1 FROM product
+               WHERE tenant_id <> '11111111-1111-1111-1111-111111111111')
+  OR NOT EXISTS (SELECT 1 FROM product) THEN
     RAISE EXCEPTION 'ISOLATION FAIL: catalog role saw the wrong product set';
   END IF;
 
@@ -497,3 +512,106 @@ BEGIN
   RAISE NOTICE 'OK: catalog role reads scoped, appends checkout, cannot mutate or reach tenant_user';
 END $$;
 COMMIT;
+
+-- ============================================================
+-- E2 / E3 CATALOG + CART FIXTURES
+-- ============================================================
+-- Everything below is plain fixture data (no asserts). It loads AFTER
+-- every isolation assert, as the seeding superuser (RESET at the COMMIT
+-- above), so RLS is bypassed and rows for both tenants insert freely.
+-- It deliberately spreads data across every E2 (catalog SSR) and E3
+-- (cart) branch so each tenant renders a DISTINCT, fully-populated state:
+--
+--   tenant config        A: show_product_prices=false / no custom_domain
+--                        B: show_product_prices=true  / custom_domain set
+--   price visibility     B has hide_price=true (per-product exception) so
+--                        "visible IFF show_product_prices AND NOT hide_price"
+--                        is observable; on A the global switch hides all.
+--   stock                in_stock=false on A2 and B3 (Indisponível badge)
+--   listing filter       is_active=false (A3) and deleted_at (B4) — both
+--                        must be excluded from the catalog listing
+--   quantity cap         max_quantity NULL (A1/B1/B2, unlimited) AND set
+--                        (A2=5, A4=2, B3=3)
+--   variations           required feature (A "Recheio", B "Tamanho"),
+--                        optional feature (A "Feature A", B "Cor"),
+--                        inactive feature (B "Oculta"), inactive option
+--                        (A "Inativo"), deltas >0 and =0
+--   images               multi-image (A1), single primary (A2/B1/B2/B3),
+--                        none (A3/A4) — placeholder branch
+--   taxonomy             multi-category (B1), no category (A4),
+--                        inactive category (A "Category A Inativa")
+--
+-- Reuses the isolation fixtures already seeded at the top: products
+-- A1/B1, Feature A/B, Category A/B, Tag A/B. New IDs only.
+-- ============================================================
+
+-- ---- Tenant A — additional products (prices globally hidden) ----------
+INSERT INTO product (id, tenant_id, name, description, price_cents, hide_price, max_quantity, in_stock, is_active, deleted_at) VALUES
+  ('aaaaaaaa-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111',
+     'Bolo de Cenoura', 'Com cobertura de chocolate.', 4500, false, 5,    false, true,  NULL),  -- out of stock + capped qty
+  ('aaaaaaaa-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111',
+     'Produto Inativo A', 'Não deve aparecer na vitrine.',  800, false, NULL, true,  false, NULL), -- is_active=false → hidden from listing
+  ('aaaaaaaa-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111',
+     'Sem Categoria A', 'Sem categoria e sem imagem.',     1200, false, 2,    true,  true,  NULL);  -- no category, no image (placeholder)
+
+-- ---- Tenant B — additional products (prices visible) ------------------
+INSERT INTO product (id, tenant_id, name, description, price_cents, hide_price, max_quantity, in_stock, is_active, deleted_at) VALUES
+  ('bbbbbbbb-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222',
+     'Sob Consulta', 'Preço sob consulta.',               9900, true,  NULL, true,  true,  NULL),  -- hide_price exception (tenant shows prices)
+  ('bbbbbbbb-0000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222',
+     'Esgotado B', 'Temporariamente sem estoque.',        3000, false, 3,    false, true,  NULL),  -- out of stock + capped qty
+  ('bbbbbbbb-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222',
+     'Produto Apagado B', 'Soft-deleted, nunca exibido.',  500, false, NULL, true,  true,  now()); -- deleted_at → excluded
+
+-- ---- Images (position 0 = primary) -----------------------------------
+-- A1 already has two images (seeded at the top, used by the swap assert).
+INSERT INTO product_image (id, tenant_id, product_id, storage_key, position) VALUES
+  ('aaaaaaaa-1111-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000002', 'a/bolo-0.jpg', 0),
+  ('bbbbbbbb-1111-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'b/camiseta-0.jpg', 0),
+  ('bbbbbbbb-1111-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002', 'b/sob-consulta-0.jpg', 0),
+  ('bbbbbbbb-1111-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000003', 'b/esgotado-0.jpg', 0);
+
+-- ---- Features (variations) -------------------------------------------
+-- 'Feature A'/'Feature B' (seeded at top, required=false) get options below.
+-- One required feature per tenant forces a cart selection; B also gets an
+-- inactive feature the catalog must skip.
+INSERT INTO feature (id, tenant_id, product_id, name, required, is_active) VALUES
+  ('aaaaaaaa-2222-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'Recheio',  true,  true),
+  ('bbbbbbbb-2222-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'Tamanho',  true,  true),
+  ('bbbbbbbb-2222-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'Oculta',   false, false); -- inactive → skipped
+
+-- ---- Options (price_delta_cents: 0 = no change, >0 = surcharge) -------
+INSERT INTO option (id, tenant_id, feature_id, name, price_delta_cents, is_active) VALUES
+  -- A · Feature A (optional)
+  ('aaaaaaaa-6666-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-2222-0000-0000-000000000001', 'Pequeno', 0,   true),
+  ('aaaaaaaa-6666-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-2222-0000-0000-000000000001', 'Grande',  500, true),
+  ('aaaaaaaa-6666-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-2222-0000-0000-000000000001', 'Inativo', 200, false), -- inactive option → skipped
+  -- A · Recheio (required)
+  ('aaaaaaaa-6666-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-2222-0000-0000-000000000002', 'Sem',      0,   true),
+  ('aaaaaaaa-6666-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-2222-0000-0000-000000000002', 'Catupiry', 300, true),
+  -- B · Cor (optional, all zero-delta)
+  ('bbbbbbbb-6666-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-2222-0000-0000-000000000001', 'Branca',   0,   true),
+  ('bbbbbbbb-6666-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-2222-0000-0000-000000000001', 'Preta',    0,   true),
+  -- B · Tamanho (required, mixed deltas)
+  ('bbbbbbbb-6666-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-2222-0000-0000-000000000002', 'P',        0,    true),
+  ('bbbbbbbb-6666-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-2222-0000-0000-000000000002', 'M',        0,    true),
+  ('bbbbbbbb-6666-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-2222-0000-0000-000000000002', 'G',        1500, true);
+
+-- ---- Extra taxonomy --------------------------------------------------
+-- 'Category A'/'Category B' and 'Tag A'/'Tag B' already seeded at the top.
+INSERT INTO category (id, tenant_id, name, is_active) VALUES
+  ('aaaaaaaa-3333-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'Category A Inativa', false), -- inactive → not a filter option
+  ('bbbbbbbb-3333-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'Category B Extra',   true);
+
+-- ---- Junctions -------------------------------------------------------
+INSERT INTO product_category (tenant_id, product_id, category_id) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'aaaaaaaa-3333-0000-0000-000000000001'),  -- A1 in Category A
+  ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000002', 'aaaaaaaa-3333-0000-0000-000000000001'),  -- A2 in Category A
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'bbbbbbbb-3333-0000-0000-000000000001'),  -- B1 in Category B …
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'bbbbbbbb-3333-0000-0000-000000000002'),  -- … and Category B Extra (multi)
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002', 'bbbbbbbb-3333-0000-0000-000000000001');  -- B2 in Category B
+
+INSERT INTO product_tag (tenant_id, product_id, tag_id) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'aaaaaaaa-4444-0000-0000-000000000001'),  -- A1 · Tag A
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000001', 'bbbbbbbb-4444-0000-0000-000000000001'),  -- B1 · Tag B
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000003', 'bbbbbbbb-4444-0000-0000-000000000001');  -- B3 · Tag B
